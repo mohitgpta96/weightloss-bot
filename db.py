@@ -140,6 +140,13 @@ def init_db():
                 date TEXT NOT NULL,
                 file_id TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS conversation_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                timestamp TEXT NOT NULL
+            );
         """)
         defaults = [
             ("is_sleeping", "0"),
@@ -161,6 +168,31 @@ def init_db():
             )
 
 
+# ── Conversation history ───────────────────────────────────────────────────────
+
+def save_message(role: str, content: str):
+    """Persist a chat message (role = 'user' or 'assistant')."""
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO conversation_history (role, content, timestamp) VALUES (?, ?, ?)",
+            (role, content, datetime.now().isoformat()),
+        )
+        # Keep only last 30 messages to avoid unbounded growth
+        conn.execute(
+            "DELETE FROM conversation_history WHERE id NOT IN "
+            "(SELECT id FROM conversation_history ORDER BY id DESC LIMIT 30)"
+        )
+
+
+def get_history(limit: int = 15) -> list[dict]:
+    """Return recent messages as list of {role, content} dicts."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT role, content FROM conversation_history ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+
 # ── State ──────────────────────────────────────────────────────────────────────
 
 def get_state(key: str) -> str:
@@ -179,7 +211,15 @@ def set_state(key: str, value: str):
 # ── Food ───────────────────────────────────────────────────────────────────────
 
 def log_food(food_name, calories, protein, carbs, fat, is_restaurant=False, raw_text="", for_date=None) -> int:
-    log_date = for_date if for_date else date.today().isoformat()
+    # Validate for_date — fall back to today if invalid (guards against AI returning placeholders)
+    if for_date:
+        try:
+            date.fromisoformat(str(for_date))
+            log_date = str(for_date)
+        except (ValueError, TypeError):
+            log_date = date.today().isoformat()
+    else:
+        log_date = date.today().isoformat()
     now = datetime.now().strftime("%H:%M")
     with get_conn() as conn:
         cur = conn.execute(
@@ -369,7 +409,10 @@ def get_streak() -> int:
     streak = 0
     check = date.today()
     for d_str in dates:
-        d = date.fromisoformat(d_str)
+        try:
+            d = date.fromisoformat(d_str)
+        except (ValueError, TypeError):
+            continue  # skip invalid date entries
         if d == check:
             streak += 1
             check = check - timedelta(days=1)

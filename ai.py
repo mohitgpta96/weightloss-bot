@@ -2,6 +2,7 @@ import os
 import base64
 import json
 import re
+from datetime import date as _date, timedelta as _td
 from groq import AsyncGroq
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
@@ -389,6 +390,124 @@ Be practical for Indian social contexts (weddings, parties, restaurant, family d
         temperature=0.4,
     )
     return response.choices[0].message.content.strip()
+
+
+async def chat_and_act(user_message: str, history: list[dict], user_context: dict) -> dict:  # noqa: C901
+    """
+    Main conversational brain. Like ChatGPT but for weight loss.
+    Returns {"reply": str, "actions": [{"type": ..., ...}]}
+
+    Actions the AI can trigger:
+      log_food        - food eaten today
+      log_food_past   - food eaten on a past date (include "date": "YYYY-MM-DD")
+      log_water       - water glasses
+      log_weight      - body weight
+      log_supplement  - supplement taken
+      log_sleep       - user went to sleep
+      log_wake        - user woke up
+    """
+    name = user_context.get("name", "there")
+    calories_today = user_context.get("calories_today", 0)
+    protein_today = user_context.get("protein_today", 0)
+    water_today = user_context.get("water_today", 0)
+    streak = user_context.get("streak", 0)
+    weight = user_context.get("weight", 0)
+    calorie_goal = user_context.get("calorie_goal", 1500)
+    protein_goal = user_context.get("protein_goal", 150)
+    water_goal = user_context.get("water_goal", 14)
+    target_weight = user_context.get("target_weight", 70)
+    today_str = _date.today().isoformat()
+    yesterday_str = (_date.today() - _td(days=1)).isoformat()
+
+    system = f"""You are a smart, friendly weight loss coach and accountability buddy for {name}.
+{name} is on a journey from ~90kg to {target_weight}kg. You help them track food, water, weight, and stay motivated.
+
+TODAY'S DATE: {today_str}  |  YESTERDAY: {yesterday_str}
+
+TODAY'S STATUS:
+- Calories: {calories_today}/{calorie_goal} kcal eaten
+- Protein: {protein_today}/{protein_goal}g
+- Water: {water_today}/{water_goal} glasses
+- Streak: {streak} days
+- Weight: {weight} kg
+
+YOUR JOB:
+1. Respond naturally and helpfully like a knowledgeable friend — not a bot
+2. When the user logs food/water/weight/supplements, extract the data and include it in "actions"
+3. Understand context across the conversation — remember what was said before
+4. Respond in the same language as the user (Hindi, English, or Hinglish mix)
+5. Keep replies SHORT — 1-3 sentences. Don't lecture.
+6. Never say "I'm an AI" or refuse to help
+
+RESPOND IN THIS EXACT JSON FORMAT:
+{{
+  "reply": "your natural response here",
+  "actions": []
+}}
+
+ACTION TYPES — include in the actions array when relevant:
+
+Log food today:
+{{"type": "log_food", "food_name": "Dal Chawal", "calories": 350, "protein": 12, "carbs": 55, "fat": 3, "is_restaurant": false}}
+
+Log food for yesterday or past date (use the actual date, e.g. {yesterday_str} for yesterday):
+{{"type": "log_food_past", "food_name": "Roti Sabzi", "calories": 280, "protein": 8, "carbs": 40, "fat": 6, "date": "{yesterday_str}"}}
+
+Log water:
+{{"type": "log_water", "glasses": 3}}
+
+Log weight:
+{{"type": "log_weight", "weight": 89.5}}
+
+Log supplement:
+{{"type": "log_supplement", "name": "Vitamin D"}}
+
+Log sleep / wake:
+{{"type": "log_sleep"}} or {{"type": "log_wake"}}
+
+EXAMPLES:
+User: "2 roti aur dal kha li"
+→ {{"reply": "Noted! Dal roti — solid choice. You're at X kcal now.", "actions": [{{"type":"log_food","food_name":"Dal Roti (2 pieces)","calories":320,"protein":11,"carbs":52,"fat":4,"is_restaurant":false}}]}}
+
+User: "kal pizza khaya tha, log karna tha"
+→ {{"reply": "No worries, logging yesterday's pizza for you.", "actions": [{{"type":"log_food_past","food_name":"Pizza","calories":700,"protein":25,"carbs":80,"fat":28,"date":"{yesterday_str}"}}]}}
+
+User: "4 glass paani piya"
+→ {{"reply": "💧 4 glasses logged! X more to hit your goal.", "actions": [{{"type":"log_water","glasses":4}}]}}
+
+User: "89.2 kg today"
+→ {{"reply": "Logged — 89.2 kg. Down X kg from start, Y kg to go!", "actions": [{{"type":"log_weight","weight":89.2}}]}}
+
+User: "yaar aaj bahut kha liya"
+→ {{"reply": "Ek din se kuch nahi bigta. Kal fresh start. Bata kya kha liya?", "actions": []}}
+
+User: "kya main samosa kha sakta hoon?"
+→ {{"reply": "Samosa ~250 kcal hai. Abhi X kcal bacha hai — ek kha sakte ho, lekin dal/roti better option hai protein ke liye.", "actions": []}}
+
+IMPORTANT: Always return valid JSON. If no actions, use empty array []. Use realistic Indian portion calorie estimates."""
+
+    messages = [{"role": "system", "content": system}]
+    messages.extend(history)
+    messages.append({"role": "user", "content": user_message})
+
+    response = await client.chat.completions.create(
+        model=TEXT_MODEL,
+        messages=messages,
+        response_format={"type": "json_object"},
+        temperature=0.7,
+        max_tokens=400,
+    )
+
+    raw = response.choices[0].message.content.strip()
+    try:
+        result = json.loads(raw)
+        if "reply" not in result:
+            result["reply"] = raw
+        if "actions" not in result:
+            result["actions"] = []
+        return result
+    except Exception:
+        return {"reply": raw, "actions": []}
 
 
 async def general_chat(text: str, user_context: dict) -> str:

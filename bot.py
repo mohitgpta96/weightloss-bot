@@ -661,6 +661,77 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def _execute_actions(update: Update, context: ContextTypes.DEFAULT_TYPE, actions: list[dict]):
+    """Execute actions returned by the AI (log food, water, weight, etc.)."""
+    from datetime import date as _date, timedelta as _td
+    yesterday = (_date.today() - _td(days=1)).isoformat()
+
+    for action in actions:
+        atype = action.get("type", "")
+        try:
+            if atype == "log_food":
+                food_id = db.log_food(
+                    action.get("food_name", "Unknown"),
+                    int(action.get("calories", 0)),
+                    float(action.get("protein", 0)),
+                    float(action.get("carbs", 0)),
+                    float(action.get("fat", 0)),
+                    bool(action.get("is_restaurant", False)),
+                )
+                # First food of day → schedule supplement reminder
+                if not db.get_state("first_food_today"):
+                    db.set_state("first_food_today", datetime.now().isoformat())
+                    context.job_queue.run_once(_supplement_reminder_job, when=1800)
+                # Milestone check
+                import milestones as _m
+                t = db.get_today_totals()
+                if int(t["calories"]) > 2100:  # cheat day threshold
+                    pass  # AI already handles this in its reply
+
+            elif atype == "log_food_past":
+                log_date = action.get("date", yesterday)
+                # Validate date — AI sometimes returns placeholder strings
+                try:
+                    from datetime import date as _d
+                    _d.fromisoformat(str(log_date))
+                except (ValueError, TypeError):
+                    log_date = yesterday
+                db.log_food(
+                    action.get("food_name", "Unknown"),
+                    int(action.get("calories", 0)),
+                    float(action.get("protein", 0)),
+                    float(action.get("carbs", 0)),
+                    float(action.get("fat", 0)),
+                    bool(action.get("is_restaurant", False)),
+                    for_date=log_date,
+                )
+
+            elif atype == "log_water":
+                db.log_water(int(action.get("glasses", 0)))
+
+            elif atype == "log_weight":
+                w = float(action.get("weight", 0))
+                if 40 <= w <= 200:
+                    db.log_weight(w)
+                    import milestones as _m
+                    _m.check_weight_milestone(w)
+
+            elif atype == "log_supplement":
+                db.log_supplement(action.get("name", ""))
+
+            elif atype == "log_sleep":
+                db.log_sleep()
+                db.set_state("is_sleeping", "1")
+
+            elif atype == "log_wake":
+                db.log_wake()
+                db.set_state("is_sleeping", "0")
+                db.set_state("first_food_today", "")
+
+        except Exception as e:
+            logger.warning(f"Action {atype} failed: {e}")
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _auth_check(update):
         return
@@ -668,357 +739,78 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     text_lower = text.lower()
 
-    # ── Awaiting measurements (set by /measure) ──
+    # ── Awaiting measurements (/measure command) — keep as structured input ──
     if db.get_state("awaiting_measurements") == "1":
         parts = text_lower.split()
-        nums = []
-        for p in parts:
-            try:
-                nums.append(float(p))
-            except ValueError:
-                pass
+        nums = [float(p) for p in parts if p.replace(".", "").isdigit()]
         if len(nums) >= 3:
             db.log_measurement(waist=nums[0], chest=nums[1], arms=nums[2])
             db.set_state("awaiting_measurements", "")
             await update.message.reply_text(
-                f"📏 Logged — Waist: {nums[0]} cm | Chest: {nums[1]} cm | Arms: {nums[2]} cm",
-                parse_mode="Markdown",
+                f"📏 Logged — Waist: {nums[0]} cm | Chest: {nums[1]} cm | Arms: {nums[2]} cm"
             )
             return
         elif nums:
-            # Some numbers but not enough — keep waiting
-            await update.message.reply_text(
-                "Need 3 numbers: waist chest arms in cm.\n_e.g. '86 92 34'_",
-                parse_mode="Markdown",
-            )
+            await update.message.reply_text("Need 3 numbers: waist chest arms. e.g. '86 92 34'")
             return
         else:
-            # No numbers at all — user is clearly not entering measurements; exit state
             db.set_state("awaiting_measurements", "")
-            # Fall through to normal message handling below
 
-    # ── Onboarding flow ──
+    # ── Onboarding ── (only runs once for new users)
     onboarding_step = db.get_state("onboarding_step")
     if onboarding_step:
         if await _handle_onboarding(update, context, text, onboarding_step):
             return
-        # Returned False → message wasn't an onboarding answer; fall through to normal handling
 
-    # ── Notification control ──
-    if any(w in text_lower for w in ("quiet", "mute", "chup")):
-        db.set_state("notifications_paused_until", (datetime.now() + timedelta(hours=12)).isoformat())
-        await update.message.reply_text("Got it, I'll be quiet until tomorrow morning.")
-        return
-    if "less messages" in text_lower or "kam messages" in text_lower:
-        db.set_state("notification_level", "low")
-        await update.message.reply_text("Switched to 1 message/day (evening only).")
-        return
-    if "more messages" in text_lower or "zyada messages" in text_lower:
-        db.set_state("notification_level", "high")
-        await update.message.reply_text("All nudges enabled. I'll check in more often.")
-        return
-
-    # ── Awaiting yesterday's food ──
-    if db.get_state("awaiting_yesterday_food") == "1":
-        from datetime import date as _date, timedelta as _td
-        yesterday = (_date.today() - _td(days=1)).isoformat()
-        if any(w in text_lower for w in ("done", "bas", "that's all", "ho gaya", "finish", "end")):
-            db.set_state("awaiting_yesterday_food", "")
-            await update.message.reply_text("✅ Yesterday's food logged. All done!", parse_mode="Markdown")
-            return
-        try:
-            food_data = await ai.analyze_food_text(text)
-            db.log_food(
-                food_data["food_name"], food_data["calories"], food_data["protein"],
-                food_data.get("carbs", 0), food_data.get("fat", 0),
-                food_data.get("is_restaurant", False), text, for_date=yesterday,
-            )
-            await update.message.reply_text(
-                f"✅ Logged for yesterday: *{food_data['food_name']}* — {food_data['calories']} kcal\n"
-                "_Keep going or say 'done' when finished._",
-                parse_mode="Markdown",
-            )
-        except Exception:
-            await update.message.reply_text("Couldn't parse that. Try: *dal chawal 1 plate*", parse_mode="Markdown")
-        return
-
-    # ── Awaiting correction (B11: now DB-persisted) ──
-    correction = _get_pending_correction()
-    if correction:
-        food_id = correction["food_id"]
-        _clear_pending_correction()
-        try:
-            d = await ai.analyze_food_text(text)  # B10: await
-            db.update_food_correction(
-                food_id, d["food_name"], d["calories"], d["protein"], d["carbs"], d["fat"]
-            )
-            await update.message.reply_text(
-                f"✅ Updated: *{d['food_name']}* — {d['calories']} kcal, {d['protein']:.0f}g protein",
-                parse_mode="Markdown",
-            )
-        except Exception:
-            await update.message.reply_text("Couldn't parse that correction.")
-        return
-
-    # ── Sleep triggers (fast string match) ──
-    for trigger in SLEEP_TRIGGERS:
-        if trigger in text_lower:
-            db.log_sleep()
-            db.set_state("is_sleeping", "1")
-            await update.message.reply_text("😴 Sleep logged. Good night!")
-            return
-
-    # ── Wake triggers ──
-    for trigger in WAKE_TRIGGERS:
-        if trigger in text_lower:
-            db.log_wake()
-            db.set_state("is_sleeping", "0")
-            db.set_state("first_food_today", "")
-            await _send_morning_summary(update.message, context)
-            return
-
-    # ── Fasting-safe items (instant approval, no calorie budget) ──
-    for item, kcal in FASTING_SAFE_ITEMS.items():
-        if item in text_lower:
-            if kcal == 0:
-                await update.message.reply_text(f"✅ *{item.title()}* — 0 kcal. Not counted.", parse_mode="Markdown")
-            else:
-                await update.message.reply_text(
-                    f"✅ *{item.title()}* — {kcal} kcal. Fasting-safe, no budget impact.", parse_mode="Markdown"
-                )
-            return
-
-    # ── Fast regex: weight ──
-    weight_match = re.search(r"\b(\d{2,3}(?:\.\d)?)\s*kg\b", text_lower)
-    if weight_match:
-        weight = float(weight_match.group(1))
-        if 40 <= weight <= 200:
-            db.log_weight(weight)
-            lost = STARTING_WEIGHT - weight
-            remaining = weight - TARGET_WEIGHT
-            avg = db.get_7day_weight_average()
-            msg = f"⚖️ *{weight} kg logged*\nLost so far: {lost:.1f} kg | {remaining:.1f} kg to goal"
-            if avg:
-                msg += f"\n_7-day avg: {avg:.1f} kg_"
-            # Milestone check
-            import milestones
-            celebration = milestones.check_weight_milestone(weight)
-            if celebration:
-                msg += f"\n\n{celebration}"
-            # TDEE recalculation nudge every 5 kg
-            kg_lost = STARTING_WEIGHT - weight
-            if kg_lost > 0 and kg_lost % 5 < 0.5:
-                new_tdee = round(2100 - (kg_lost / 5) * 100)
-                msg += f"\n\n💡 _You've lost {kg_lost:.0f} kg! Your TDEE has dropped ~{int(kg_lost/5)*100} kcal. Consider reducing to {new_tdee - 600} kcal/day or adding a 20-min walk._"
-            await update.message.reply_text(msg, parse_mode="Markdown")
-            return
-
-    # ── Fast regex: water ──
-    water_match = re.search(r"\b(\d+)\s*(glass|glasses|gilas)\b", text_lower)
-    if water_match:
-        glasses = int(water_match.group(1))
-        if 0 < glasses <= 25:
-            total = db.log_water(glasses)
-            await update.message.reply_text(
-                f"💧 +{glasses} glasses. Total: *{total} / {WATER_GOAL}* [{_bar(total, WATER_GOAL)}]",
-                parse_mode="Markdown",
-            )
-            return
-
-    # ── AI intent detection (B10: await) ──
+    # ── Show typing indicator ──
     await context.bot.send_chat_action(update.effective_chat.id, "typing")
+
+    # ── Save user message to history ──
+    db.save_message("user", text)
+
+    # ── Build user context ──
+    t = db.get_today_totals()
+    from config import PROTEIN_GOAL as PG, WATER_GOAL as WG, TARGET_WEIGHT as TW
+    user_ctx = {
+        "name": db.get_state("user_name") or "",
+        "calories_today": int(t["calories"]),
+        "protein_today": int(t["protein"]),
+        "water_today": db.get_today_water(),
+        "streak": db.get_streak(),
+        "weight": db.get_latest_weight(),
+        "calorie_goal": CALORIE_GOAL,
+        "protein_goal": PG,
+        "water_goal": WG,
+        "target_weight": TW,
+    }
+
+    # ── Get conversation history ──
+    history = db.get_history(limit=12)
+
+    # ── Call AI brain ──
     try:
-        intent_data = await ai.detect_intent(text)
-        intent = intent_data.get("intent", "other")
-        details = intent_data.get("details", {})
-    except Exception:
-        intent, details = "other", {}
+        result = await ai.chat_and_act(text, history, user_ctx)
+        reply = result.get("reply", "")
+        actions = result.get("actions", [])
+    except Exception as e:
+        logger.exception("chat_and_act failed")
+        reply = "Kuch problem aa gayi, dobara try karo."
+        actions = []
 
-    if intent == "weight_log":
-        w = details.get("weight")
-        if w and 40 <= float(w) <= 200:
-            db.log_weight(float(w))
-            lost = STARTING_WEIGHT - float(w)
-            await update.message.reply_text(
-                f"⚖️ *{w} kg logged*\nLost so far: {lost:.1f} kg", parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text("Couldn't parse weight. Try: *90.2 kg*", parse_mode="Markdown")
+    # ── Execute any logged actions ──
+    if actions:
+        await _execute_actions(update, context, actions)
 
-    elif intent == "water_log":
-        g = details.get("glasses")
-        if g and 0 < int(g) <= 25:
-            total = db.log_water(int(g))
-            await update.message.reply_text(
-                f"💧 +{g} glasses. Total: *{total} / {WATER_GOAL}* [{_bar(total, WATER_GOAL)}]",
-                parse_mode="Markdown",
-            )
-        else:
-            await update.message.reply_text("Couldn't parse water count. Try: *5 glass pani piya*", parse_mode="Markdown")
+    # ── Send reply ──
+    if reply:
+        await update.message.reply_text(reply)
+        db.save_message("assistant", reply)
 
-    elif intent == "food_question":
-        query = details.get("query", text)
-        t = db.get_today_totals()
-        remaining_cal = max(CALORIE_GOAL - int(t["calories"]), 0)
-        remaining_prot = max(int(PROTEIN_GOAL - t["protein"]), 0)
-        try:
-            safety = await ai.check_food_safety(query, remaining_cal, remaining_prot)  # B10: await
-        except Exception:
-            await update.message.reply_text("Couldn't check that right now. Try again.")
-            return
-
-        food = safety.get("food", query)
-        est_cal = safety.get("estimated_calories", 0)
-        est_prot = safety.get("estimated_protein", 0)
-        is_safe = safety.get("is_safe", False)
-        reason = safety.get("reason", "")
-        recommendation = safety.get("recommendation", "")
-
-        if is_safe:
-            msg = (
-                f"✅ *{food}* — go ahead!\n\n"
-                f"~{est_cal} kcal · ~{est_prot}g protein\n"
-                f"Remaining after: {remaining_cal - est_cal} kcal\n"
-            )
-            if recommendation:
-                msg += f"_Tip: {recommendation}_\n"
-        else:
-            msg = (
-                f"❌ *{food}* — {est_cal} kcal, too much (only {remaining_cal} kcal left)\n"
-                f"_{reason}_\n\n"
-            )
-
-        alts = safety.get("alternatives", [])
-        if alts:
-            msg += "\n💡 *Better options:*\n"
-            for alt in alts[:3]:
-                msg += f"• *{alt['name']}* (~{alt['calories']} kcal"
-                if alt.get("protein"):
-                    msg += f", {alt['protein']}g protein"
-                msg += ")\n"
-                if alt.get("why"):
-                    msg += f"  _{alt['why']}_\n"
-
-        await update.message.reply_text(msg, parse_mode="Markdown")
-
-    elif intent == "ingredient_query":
-        ingredients = details.get("ingredients", [text])
-        t = db.get_today_totals()
-        remaining_cal = max(CALORIE_GOAL - int(t["calories"]), 0)
-        remaining_prot = max(int(PROTEIN_GOAL - t["protein"]), 0)
-        try:
-            recipes = await ai.suggest_recipes(ingredients, remaining_cal, remaining_prot)  # B10: await
-        except Exception:
-            await update.message.reply_text("Couldn't suggest recipes right now. Try again.")
-            return
-        if not recipes:
-            await update.message.reply_text("Couldn't find recipes with those ingredients. Try listing more items.")
-            return
-        lines = [f"Here's what you can make with *{', '.join(ingredients[:4])}*:\n"]
-        keyboard_rows = []
-        for i, r in enumerate(recipes[:5]):
-            tag = f" _{r.get('tag', '')}_" if r.get("tag") else ""
-            lines.append(
-                f"{i+1}. {r.get('emoji','🍽')} *{r['name']}*{tag}\n"
-                f"   ⏱ {r.get('cook_time_mins', '?')} min  |  🔥 {r['calories']} kcal  |  💪 {r['protein']:.0f}g protein"
-            )
-            keyboard_rows.append([InlineKeyboardButton(
-                f"Log #{i+1}: {r['name'][:25]}",
-                callback_data=f"recipe_{r['calories']}_{r['protein']}_{r.get('carbs', 0)}_{r.get('fat', 0)}_{r['name'][:20]}"
-            )])
-        await update.message.reply_text(
-            "\n".join(lines), parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard_rows),
-        )
-
-    elif intent == "craving":
-        craving = details.get("craving", text)
-        t = db.get_today_totals()
-        remaining_cal = max(CALORIE_GOAL - int(t["calories"]), 0)
-        try:
-            msg = await ai.handle_craving(craving, remaining_cal)  # B10: await
-        except Exception:
-            msg = f"Craving {craving}? Try drinking a glass of water first — cravings often pass in 10 minutes."
-        await update.message.reply_text(msg)
-
-    elif intent == "social_eating":
-        ctx_desc = details.get("context", text)
-        t = db.get_today_totals()
-        remaining_cal = max(CALORIE_GOAL - int(t["calories"]), 0)
-        try:
-            msg = await ai.handle_social_eating(ctx_desc, remaining_cal)  # B10: await
-        except Exception:
-            msg = "Eating out? Stick to dal/sabzi over fried items. Estimate calories conservatively and log after."
-        await update.message.reply_text(msg)
-
-    elif intent == "yesterday_log":
-        db.set_state("awaiting_yesterday_food", "1")
-        await update.message.reply_text(
-            "Sure! Tell me what you ate yesterday — one item at a time.\n"
-            "Say *'done'* when you've logged everything.",
-            parse_mode="Markdown",
-        )
-
-    elif intent == "food_log":
-        food_text = details.get("food", text)
-        try:
-            food_data = await ai.analyze_food_text(food_text)  # B10: await
-            await _process_food(update, context, food_data, raw_text=food_text)
-        except Exception:
-            await update.message.reply_text(
-                "Couldn't analyze that. Be more specific: e.g. *dal chawal, 1 plate*",
-                parse_mode="Markdown",
-            )
-
-    elif intent == "sleep":
-        db.log_sleep()
-        db.set_state("is_sleeping", "1")
-        await update.message.reply_text("😴 Sleep logged. Good night!")
-
-    elif intent == "wake":
-        db.log_wake()
-        db.set_state("is_sleeping", "0")
-        db.set_state("first_food_today", "")
-        await _send_morning_summary(update.message, context)
-
-    elif intent == "supplement_log":
-        supp_text = details.get("supplement", "").lower()
-        matched = None
-        for s in SUPPLEMENTS:
-            if supp_text in s["name"].lower() or s["name"].lower() in supp_text:
-                matched = s["name"]
-                break
-        if matched:
-            success = db.log_supplement(matched)
-            taken_count = len(db.get_today_supplements())
-            if success:
-                await update.message.reply_text(
-                    f"✅ *{matched}* logged. {taken_count}/{len(SUPPLEMENTS)} today.",
-                    parse_mode="Markdown",
-                )
-            else:
-                await update.message.reply_text(f"Already logged {matched} today.")
-        else:
-            await update.message.reply_text(
-                "Which supplement? e.g. *iron le liya* or *b12 kha liya*",
-                parse_mode="Markdown",
-            )
-
-    else:
-        # intent == "chat" or anything unrecognized — respond like a human coach
-        t = db.get_today_totals()
-        user_ctx = {
-            "name": db.get_state("user_name") or "",
-            "calories_today": int(t["calories"]),
-            "protein_today": int(t["protein"]),
-            "streak": db.get_streak(),
-            "weight": db.get_latest_weight(),
-        }
-        try:
-            reply = await ai.general_chat(text, user_ctx)
-            await update.message.reply_text(reply)
-        except Exception:
-            await update.message.reply_text("Hmm, say that again?")
+    # ── Supplement reminder after first food ──
+    has_food_action = any(a.get("type") in ("log_food",) for a in actions)
+    if has_food_action and not db.get_state("first_food_today"):
+        db.set_state("first_food_today", datetime.now().isoformat())
+        context.job_queue.run_once(_supplement_reminder_job, when=1800)
 
 
 # ── Onboarding helpers ─────────────────────────────────────────────────────────
