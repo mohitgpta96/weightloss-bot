@@ -1,0 +1,63 @@
+name: Weightloss Bot 24/7
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340  # 5h 40min — stays under 6h GitHub limit
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore database
+        uses: actions/cache@v4
+        with:
+          path: bot.db
+          key: bot-database
+          restore-keys: bot-database
+
+      - name: Run bot
+        run: |
+          python main.py &
+          BOT_PID=$!
+          # Wait 5h 30min then gracefully stop
+          sleep 19800
+          kill -SIGTERM $BOT_PID 2>/dev/null || true
+          sleep 10
+          echo "Bot stopped for restart cycle"
+
+      - name: Save database
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: bot.db
+          key: bot-database
+
+      - name: Trigger next run
+        if: always()
+        run: |
+          curl -s -X POST \
+            -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/workflows/bot.yml/dispatches \
+            -d '{"ref":"main"}'
+          echo "Next run triggered"
