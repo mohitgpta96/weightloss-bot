@@ -211,24 +211,27 @@ async def nightly_coaching(context: ContextTypes.DEFAULT_TYPE):
 
 # ── Job 8: Water nudge (every 2 hours, 1–9 PM, max twice/day) ───────────────
 
-_water_nudge_count_today = {"date": "", "count": 0}
-
 async def water_nudge(context: ContextTypes.DEFAULT_TYPE):
     if _notification_level() == "low":
         return
-    today = str(db.date.today())
-    if _water_nudge_count_today["date"] != today:
-        _water_nudge_count_today["date"] = today
-        _water_nudge_count_today["count"] = 0
 
-    if _water_nudge_count_today["count"] >= 2:
+    # Persist nudge count to DB so it survives GitHub Actions restarts
+    today = str(db.date.today())
+    stored_date = db.get_state("water_nudge_date") or ""
+    stored_count = int(db.get_state("water_nudge_count") or "0")
+    if stored_date != today:
+        stored_count = 0
+        db.set_state("water_nudge_date", today)
+        db.set_state("water_nudge_count", "0")
+
+    if stored_count >= 2:
         return
 
     water = db.get_today_water()
-    if water >= 8:
+    if water >= WATER_GOAL:
         return
 
-    _water_nudge_count_today["count"] += 1
+    db.set_state("water_nudge_count", str(stored_count + 1))
     remaining = WATER_GOAL - water
     await _send(
         context,
@@ -366,28 +369,35 @@ async def weekend_alert(context: ContextTypes.DEFAULT_TYPE):
 def register_all_jobs(app: Application):
     jq = app.job_queue
 
+    # IST = UTC+5:30 — must be set so jobs fire at correct local time
+    # whether bot runs on GitHub Actions (UTC) or locally
+    IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+
+    def t(hour: int, minute: int = 0) -> dt.time:
+        return dt.time(hour, minute, 0, tzinfo=IST)
+
     today = db.date.today()
     is_weekend = today.weekday() >= 5  # 5=Sat, 6=Sun
 
     # Recurring daily jobs — use run_daily (survive restarts)
-    morning_time = dt.time(8, 30, 0) if is_weekend else dt.time(7, 0, 0)
-    jq.run_daily(midnight_reset,        time=dt.time(0, 1, 0))
-    jq.run_daily(morning_greeting,      time=morning_time)
-    jq.run_daily(window_opening,        time=dt.time(13, 25, 0))
-    jq.run_daily(midday_checkin,        time=dt.time(13, 35, 0))
-    jq.run_daily(window_closing_warning, time=dt.time(21, 0, 0))
-    jq.run_daily(window_closed,         time=dt.time(21, 30, 0))
-    jq.run_daily(nightly_coaching,      time=dt.time(22, 0, 0))
-    jq.run_daily(streak_protection,     time=dt.time(20, 0, 0))
-    jq.run_daily(weight_reminder,       time=dt.time(8, 0, 0))
+    morning_time = t(8, 30) if is_weekend else t(7, 0)
+    jq.run_daily(midnight_reset,         time=t(0, 1))
+    jq.run_daily(morning_greeting,       time=morning_time)
+    jq.run_daily(window_opening,         time=t(13, 25))
+    jq.run_daily(midday_checkin,         time=t(13, 35))
+    jq.run_daily(window_closing_warning, time=t(21, 0))
+    jq.run_daily(window_closed,          time=t(21, 30))
+    jq.run_daily(nightly_coaching,       time=t(22, 0))
+    jq.run_daily(streak_protection,      time=t(20, 0))
+    jq.run_daily(weight_reminder,        time=t(8, 0))
 
     # Water nudge every 2 hours between 1 PM and 9 PM
     for hour in range(13, 21, 2):
-        jq.run_daily(water_nudge, time=dt.time(hour, 0, 0))
+        jq.run_daily(water_nudge, time=t(hour))
 
     # Weekly jobs
-    jq.run_daily(weekly_report,  time=dt.time(20, 0, 0), days=(6,))   # Sunday
-    jq.run_daily(weekend_alert,  time=dt.time(18, 0, 0), days=(4,))   # Friday
+    jq.run_daily(weekly_report,  time=t(20, 0), days=(6,))   # Sunday
+    jq.run_daily(weekend_alert,  time=t(18, 0), days=(4,))   # Friday
 
     # Restart recovery: re-schedule supplement reminder if within window
     first_food_ts = db.get_state("first_food_today")

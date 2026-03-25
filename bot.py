@@ -683,12 +683,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown",
             )
             return
-        else:
+        elif nums:
+            # Some numbers but not enough — keep waiting
             await update.message.reply_text(
                 "Need 3 numbers: waist chest arms in cm.\n_e.g. '86 92 34'_",
                 parse_mode="Markdown",
             )
             return
+        else:
+            # No numbers at all — user is clearly not entering measurements; exit state
+            db.set_state("awaiting_measurements", "")
+            # Fall through to normal message handling below
 
     # ── Onboarding flow ──
     onboarding_step = db.get_state("onboarding_step")
@@ -908,7 +913,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             keyboard_rows.append([InlineKeyboardButton(
                 f"Log #{i+1}: {r['name'][:25]}",
-                callback_data=f"recipe_{r['calories']}_{r['protein']}_{r['carbs']}_{r['fat']}_{r['name'][:20]}"
+                callback_data=f"recipe_{r['calories']}_{r['protein']}_{r.get('carbs', 0)}_{r.get('fat', 0)}_{r['name'][:20]}"
             )])
         await update.message.reply_text(
             "\n".join(lines), parse_mode="Markdown",
