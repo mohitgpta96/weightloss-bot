@@ -178,15 +178,15 @@ def set_state(key: str, value: str):
 
 # ── Food ───────────────────────────────────────────────────────────────────────
 
-def log_food(food_name, calories, protein, carbs, fat, is_restaurant=False, raw_text="") -> int:
-    today = date.today().isoformat()
+def log_food(food_name, calories, protein, carbs, fat, is_restaurant=False, raw_text="", for_date=None) -> int:
+    log_date = for_date if for_date else date.today().isoformat()
     now = datetime.now().strftime("%H:%M")
     with get_conn() as conn:
         cur = conn.execute(
             """INSERT INTO food_logs
                (date, time, food_name, calories, protein, carbs, fat, is_restaurant, raw_text)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (today, now, food_name, calories, protein, carbs, fat, int(is_restaurant), raw_text),
+            (log_date, now, food_name, calories, protein, carbs, fat, int(is_restaurant), raw_text),
         )
         return cur.lastrowid
 

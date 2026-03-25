@@ -164,12 +164,13 @@ async def detect_intent(text: str) -> dict:
 "{text}"
 
 {{
-  "intent": "food_log|water_log|weight_log|sleep|wake|food_question|supplement_log|ingredient_query|craving|social_eating|notification_control|other",
+  "intent": "food_log|yesterday_log|water_log|weight_log|sleep|wake|food_question|supplement_log|ingredient_query|craving|social_eating|notification_control|chat",
   "details": {{}}
 }}
 
 Intent rules:
-- food_log: ate/drank something ("kha liya", "khaya", food names, meal descriptions, "chai", "coffee")
+- food_log: ate/drank something TODAY ("kha liya", "khaya", food names, meal descriptions, "chai", "coffee")
+- yesterday_log: wants to log food eaten YESTERDAY ("kal ka khana", "log yesterday", "yesterday I ate", "kal khaya tha", "forgot to log yesterday", "kal nahi daala")
 - water_log: mentions pani/water + quantity ("5 glass pani", "4 glasses piya")
 - weight_log: mentions kg + number ("90.5 kg", "weight 89", just "89.5")
 - sleep: going to sleep ("so raha hoon", "goodnight", "gn", "neend aa rahi")
@@ -180,7 +181,7 @@ Intent rules:
 - craving: craving food ("X khane ka mann hai", "X chahiye", "I'm craving X", "bhookh lag rahi")
 - social_eating: eating out or social event ("bahar khana hai", "party hai", "restaurant ja raha", "kisi ke ghar khana")
 - notification_control: managing message frequency ("quiet", "mute", "less messages", "more messages", "kam messages")
-- other: anything else
+- chat: everything else — questions, venting, "I messed up", motivation, small talk, general conversation
 
 For water_log: details = {{"glasses": 5}}
 For weight_log: details = {{"weight": 90.5}}
@@ -191,7 +192,7 @@ For ingredient_query: details = {{"ingredients": ["aloo", "pyaaz", "tamatar"]}}
 For craving: details = {{"craving": "what they're craving"}}
 For social_eating: details = {{"context": "brief description"}}
 For notification_control: details = {{"action": "quiet|less|more"}}
-For sleep/wake: details = {{}}"""
+For sleep/wake/chat/yesterday_log: details = {{}}"""
 
     response = await client.chat.completions.create(
         model=TEXT_MODEL,
@@ -386,6 +387,40 @@ Be practical for Indian social contexts (weddings, parties, restaurant, family d
             {"role": "user", "content": prompt},
         ],
         temperature=0.4,
+    )
+    return response.choices[0].message.content.strip()
+
+
+async def general_chat(text: str, user_context: dict) -> str:
+    """Respond naturally to any message — questions, venting, small talk, etc."""
+    name = user_context.get("name", "")
+    calories = user_context.get("calories_today", 0)
+    protein = user_context.get("protein_today", 0)
+    streak = user_context.get("streak", 0)
+    weight = user_context.get("weight", 0)
+
+    system = f"""You are a friendly, warm Indian weight loss coach and accountability buddy.
+You're talking to {name or 'the user'} who is on a 90kg → 70kg journey.
+Today: {calories} kcal eaten, {protein}g protein, {streak}-day streak, current weight {weight}kg.
+
+Rules:
+- Respond in the same language as the user (Hindi/English/Hinglish)
+- Keep responses SHORT — 2-4 sentences max
+- Be human, warm, and direct — no corporate speak
+- If they messed up, be supportive not preachy
+- If they ask a question, answer it
+- If they're frustrated, acknowledge it first then help
+- NEVER say "I'm an AI" or "I cannot"
+- Sign off responses naturally, not with bullet points"""
+
+    response = await client.chat.completions.create(
+        model=TEXT_MODEL,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": text},
+        ],
+        max_tokens=200,
+        temperature=0.7,
     )
     return response.choices[0].message.content.strip()
 

@@ -85,6 +85,7 @@ def reset_db():
     db.set_state("user_wake_time", "")
     db.set_state("user_motivation", "")
     db.set_state("awaiting_measurements", "")
+    db.set_state("awaiting_yesterday_food", "")
     db.set_state("pending_correction_food_id", "")
     db.set_state("pending_correction_expires_at", "")
 
@@ -347,6 +348,48 @@ async def run_all():
         sleeping = db.get_state("is_sleeping")
         assert sleeping == "0", f"Should wake up, is_sleeping={sleeping}"
 
+    async def t31_yesterday_log_trigger():
+        reset_db()
+        db.set_state("user_name", "Mohit")
+        await bot_module.handle_text(make_update("I want to log yesterday's meals"), make_context())
+        state = db.get_state("awaiting_yesterday_food")
+        reply = last_reply()
+        assert state == "1", f"Should set awaiting_yesterday_food, got '{state}'. Reply: {reply[:80]}"
+
+    async def t32_yesterday_food_item_logged():
+        reset_db()
+        db.set_state("user_name", "Mohit")
+        db.set_state("awaiting_yesterday_food", "1")
+        from datetime import date as _d, timedelta as _td
+        yesterday = (_d.today() - _td(days=1)).isoformat()
+        await bot_module.handle_text(make_update("dal chawal 1 plate"), make_context())
+        import sqlite3
+        conn = sqlite3.connect(str(db.DB_PATH))
+        row = conn.execute("SELECT date FROM food_logs ORDER BY id DESC LIMIT 1").fetchone()
+        conn.close()
+        assert row and row[0] == yesterday, f"Should log for {yesterday}, got {row}"
+
+    async def t33_yesterday_done_clears_state():
+        reset_db()
+        db.set_state("user_name", "Mohit")
+        db.set_state("awaiting_yesterday_food", "1")
+        await bot_module.handle_text(make_update("done"), make_context())
+        assert db.get_state("awaiting_yesterday_food") == "", "Should clear state"
+
+    async def t34_general_chat_messed_up():
+        reset_db()
+        db.set_state("user_name", "Mohit")
+        await bot_module.handle_text(make_update("yaar aaj bahut kha liya, sab barbaad ho gaya"), make_context())
+        reply = last_reply()
+        assert len(reply) > 20 and "not sure" not in reply.lower(), f"Bad reply: {reply[:80]}"
+
+    async def t35_general_chat_question():
+        reset_db()
+        db.set_state("user_name", "Mohit")
+        await bot_module.handle_text(make_update("kal ke liye meal plan suggest karo"), make_context())
+        reply = last_reply()
+        assert len(reply) > 30 and "not sure" not in reply.lower(), f"Bad reply: {reply[:80]}"
+
     # ── Run all tests ──────────────────────────────────────────────────────────
 
     tests = [
@@ -380,6 +423,11 @@ async def run_all():
         ("T28 'Messed up' flow", t28_messed_up_flow),
         ("T29 Sleep trigger", t29_sleep_trigger),
         ("T30 Wake trigger", t30_wake_trigger),
+        ("T31 Yesterday log: triggers state", t31_yesterday_log_trigger),
+        ("T32 Yesterday log: food saved with yesterday date", t32_yesterday_food_item_logged),
+        ("T33 Yesterday log: 'done' clears state", t33_yesterday_done_clears_state),
+        ("T34 General chat: messed up handled naturally", t34_general_chat_messed_up),
+        ("T35 General chat: question answered", t35_general_chat_question),
     ]
 
     print(f"\n🧪 Running {len(tests)} test cases...\n")

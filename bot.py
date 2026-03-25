@@ -718,20 +718,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("All nudges enabled. I'll check in more often.")
         return
 
-    # ── "I messed up" re-engagement ──
-    if any(p in text_lower for p in ("sab kuch kha liya", "bura din tha", "cheat ho gaya", "bahut kha liya")):
-        t = db.get_today_totals()
-        overage = max(int(t["calories"]) - CALORIE_GOAL, 0)
-        foods = [f["food_name"] for f in db.get_today_food()]
+    # ── Awaiting yesterday's food ──
+    if db.get_state("awaiting_yesterday_food") == "1":
+        from datetime import date as _date, timedelta as _td
+        yesterday = (_date.today() - _td(days=1)).isoformat()
+        if any(w in text_lower for w in ("done", "bas", "that's all", "ho gaya", "finish", "end")):
+            db.set_state("awaiting_yesterday_food", "")
+            await update.message.reply_text("✅ Yesterday's food logged. All done!", parse_mode="Markdown")
+            return
         try:
-            plan_msg = await ai.generate_recovery_plan(overage, foods)  # B10: await
+            food_data = await ai.analyze_food_text(text)
+            db.log_food(
+                food_data["food_name"], food_data["calories"], food_data["protein"],
+                food_data.get("carbs", 0), food_data.get("fat", 0),
+                food_data.get("is_restaurant", False), text, for_date=yesterday,
+            )
+            await update.message.reply_text(
+                f"✅ Logged for yesterday: *{food_data['food_name']}* — {food_data['calories']} kcal\n"
+                "_Keep going or say 'done' when finished._",
+                parse_mode="Markdown",
+            )
         except Exception:
-            plan_msg = f"One heavy day sets you back by about 1–2 days at most. Reset tomorrow: aim for {CALORIE_GOAL} kcal and 130g protein."
-        msg = (
-            "That's fine — one meal doesn't undo your progress.\n\n"
-            f"{plan_msg}"
-        )
-        await update.message.reply_text(msg)
+            await update.message.reply_text("Couldn't parse that. Try: *dal chawal 1 plate*", parse_mode="Markdown")
         return
 
     # ── Awaiting correction (B11: now DB-persisted) ──
@@ -943,6 +951,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg = "Eating out? Stick to dal/sabzi over fried items. Estimate calories conservatively and log after."
         await update.message.reply_text(msg)
 
+    elif intent == "yesterday_log":
+        db.set_state("awaiting_yesterday_food", "1")
+        await update.message.reply_text(
+            "Sure! Tell me what you ate yesterday — one item at a time.\n"
+            "Say *'done'* when you've logged everything.",
+            parse_mode="Markdown",
+        )
+
     elif intent == "food_log":
         food_text = details.get("food", text)
         try:
@@ -989,21 +1005,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     else:
-        # Default: short messages (≤6 words) with no clear intent → try as food
-        words = text.split()
-        if len(words) <= 6:
-            try:
-                food_data = await ai.analyze_food_text(text)  # B10: await
-                await _process_food(update, context, food_data, raw_text=text)
-            except Exception:
-                await update.message.reply_text(
-                    "Didn't catch that. Try:\n• Food name to log\n• *90.2 kg* for weight\n• *5 glass pani* for water\n• /today for dashboard",
-                    parse_mode="Markdown",
-                )
-        else:
-            await update.message.reply_text(
-                "Not sure what to do with that. /today for dashboard · /plan for your plan."
-            )
+        # intent == "chat" or anything unrecognized — respond like a human coach
+        t = db.get_today_totals()
+        user_ctx = {
+            "name": db.get_state("user_name") or "",
+            "calories_today": int(t["calories"]),
+            "protein_today": int(t["protein"]),
+            "streak": db.get_streak(),
+            "weight": db.get_latest_weight(),
+        }
+        try:
+            reply = await ai.general_chat(text, user_ctx)
+            await update.message.reply_text(reply)
+        except Exception:
+            await update.message.reply_text("Hmm, say that again?")
 
 
 # ── Onboarding helpers ─────────────────────────────────────────────────────────
