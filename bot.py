@@ -1010,22 +1010,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 _SKIP_WORDS = ("skip", "baad mein", "later", "abhi nahi", "nahi", "cancel")
 
-def _extract_name(text: str) -> str:
-    """Extract name from natural language input."""
-    t = text.strip()
-    # Explicit name phrases in English and Hindi
-    patterns = [
-        r"(?:call me|my name is|mera naam|naam hai|i am|i'm|main hoon)\s+([A-Za-z]+)",
-        r"^([A-Za-z]+)\s*[,.]",  # "Mohit, 90 kg"
-        r"^([A-Za-z]+)$",         # bare name
-    ]
-    for pat in patterns:
-        m = re.search(pat, t, re.IGNORECASE)
-        if m:
-            return m.group(1).capitalize()
-    # Last resort: last alphabetic word ("hi call me Mohit" → "Mohit")
-    words = re.sub(r"[^a-zA-Z\s]", "", t).strip().split()
-    return words[-1].capitalize() if words else "Friend"
 
 
 # ── Onboarding flow ────────────────────────────────────────────────────────────
@@ -1049,7 +1033,7 @@ async def _handle_onboarding(
 
     if step == "name":
         weight_match = re.search(r"\b(\d{2,3}(?:\.\d)?)\s*kg\b", text_lower)
-        name = _extract_name(text)
+        name = await ai.extract_name(text)
         db.set_state("user_name", name)
         if weight_match:
             w = float(weight_match.group(1))

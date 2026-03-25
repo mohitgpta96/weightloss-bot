@@ -388,3 +388,25 @@ Be practical for Indian social contexts (weddings, parties, restaurant, family d
         temperature=0.4,
     )
     return response.choices[0].message.content.strip()
+
+
+async def extract_name(text: str) -> str:
+    """Extract a person's name from natural language (Hindi/English mix)."""
+    try:
+        resp = await client.chat.completions.create(
+            model=TEXT_MODEL,
+            messages=[{
+                "role": "user",
+                "content": (
+                    "Extract ONLY the person's name from this message. "
+                    "Return just the name, nothing else — no punctuation, no explanation. "
+                    f"Message: \"{text}\""
+                ),
+            }],
+            max_tokens=10,
+            temperature=0,
+        )
+        name = resp.choices[0].message.content.strip().split()[0]
+        return name.capitalize() if name.isalpha() else "Friend"
+    except Exception:
+        return "Friend"
