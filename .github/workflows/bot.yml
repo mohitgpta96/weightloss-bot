@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: bot-singleton
+  cancel-in-progress: true
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
