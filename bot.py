@@ -158,8 +158,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _auth_check(update):
         return
     name = db.get_state("user_name") or "there"
-    if name != "there":
-        # Already onboarded — show quick status
+    # If already onboarded AND not being forced to re-run, show quick status
+    args = context.args or []
+    if name != "there" and "reset" not in args:
         text = (
             f"👋 *Welcome back, {name}!*\n\n"
             f"📋 *Commands:*\n"
@@ -167,11 +168,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/goal · /insights · /milestones · /deficit · /fasting\n"
             "/mood · /workout · /measure · /undo\n"
             "/slept · /woke\n\n"
-            "_Type what you ate, send a food photo, or ask 'kya main X kha sakta hoon?'_"
+            "_Type what you ate, send a food photo, or ask 'kya main X kha sakta hoon?'_\n\n"
+            "_To update your name or profile: /start reset_"
         )
         await update.message.reply_text(text, parse_mode="Markdown")
         return
-    # New user — start conversational onboarding
+    # New user or explicit reset — start conversational onboarding
     db.set_state("onboarding_step", "name")
     await update.message.reply_text(
         "👋 *Hi! I'm your personal weight loss buddy.*\n\n"
@@ -698,8 +700,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Onboarding flow ──
     onboarding_step = db.get_state("onboarding_step")
     if onboarding_step:
-        await _handle_onboarding(update, context, text, onboarding_step)
-        return
+        if await _handle_onboarding(update, context, text, onboarding_step):
+            return
+        # Returned False → message wasn't an onboarding answer; fall through to normal handling
 
     # ── Notification control ──
     if any(w in text_lower for w in ("quiet", "mute", "chup")):
@@ -1003,13 +1006,50 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
 
+# ── Onboarding helpers ─────────────────────────────────────────────────────────
+
+_SKIP_WORDS = ("skip", "baad mein", "later", "abhi nahi", "nahi", "cancel")
+
+def _extract_name(text: str) -> str:
+    """Extract name from natural language input."""
+    t = text.strip()
+    # Explicit name phrases in English and Hindi
+    patterns = [
+        r"(?:call me|my name is|mera naam|naam hai|i am|i'm|main hoon)\s+([A-Za-z]+)",
+        r"^([A-Za-z]+)\s*[,.]",  # "Mohit, 90 kg"
+        r"^([A-Za-z]+)$",         # bare name
+    ]
+    for pat in patterns:
+        m = re.search(pat, t, re.IGNORECASE)
+        if m:
+            return m.group(1).capitalize()
+    # Last resort: last alphabetic word ("hi call me Mohit" → "Mohit")
+    words = re.sub(r"[^a-zA-Z\s]", "", t).strip().split()
+    return words[-1].capitalize() if words else "Friend"
+
+
 # ── Onboarding flow ────────────────────────────────────────────────────────────
 
-async def _handle_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, step: str):
+async def _handle_onboarding(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, step: str
+) -> bool:
+    """Handle one onboarding step. Returns True if message was consumed, False to fall through."""
+    text_lower = text.lower()
+
+    # Universal skip — user can bail out of onboarding at any point
+    if any(w in text_lower for w in _SKIP_WORDS):
+        db.set_state("onboarding_step", "")
+        name = db.get_state("user_name") or ""
+        msg = f"No worries, {name}! " if name else "No worries! "
+        await update.message.reply_text(
+            msg + "You can chat normally now. I'll finish setup when you're ready.",
+            parse_mode="Markdown",
+        )
+        return True
+
     if step == "name":
-        # Parse "Mohit, 90 kg" or just "Mohit"
-        weight_match = re.search(r"\b(\d{2,3}(?:\.\d)?)\s*kg\b", text.lower())
-        name = re.sub(r",?\s*\d+.*$", "", text).strip().split()[0].capitalize()
+        weight_match = re.search(r"\b(\d{2,3}(?:\.\d)?)\s*kg\b", text_lower)
+        name = _extract_name(text)
         db.set_state("user_name", name)
         if weight_match:
             w = float(weight_match.group(1))
@@ -1026,23 +1066,33 @@ async def _handle_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE,
                 f"Nice to meet you, *{name}!*\n\nWhat do you weigh right now? _(e.g. 90 kg)_",
                 parse_mode="Markdown",
             )
+        return True
 
     elif step == "weight":
-        weight_match = re.search(r"\b(\d{2,3}(?:\.\d)?)\s*kg?\b", text.lower())
+        weight_match = re.search(r"\b(\d{2,3}(?:\.\d)?)\s*kg?\b", text_lower)
         if weight_match:
             w = float(weight_match.group(1))
             db.log_weight(w)
             db.set_state("onboarding_step", "diet")
+            name = db.get_state("user_name") or "there"
             await update.message.reply_text(
                 f"Got it — {w} kg. {w - TARGET_WEIGHT:.0f} kg to your goal.\n\n"
                 "Are you *vegetarian*, or do you eat everything?",
                 parse_mode="Markdown",
             )
+            return True
         else:
-            await update.message.reply_text("Didn't catch that. Try: *89 kg*", parse_mode="Markdown")
+            # No number — let the message fall through to normal handling
+            return False
 
     elif step == "diet":
-        diet = "vegetarian" if any(w in text.lower() for w in ("veg", "vegetarian", "no meat", "no chicken")) else "non-vegetarian"
+        if any(w in text_lower for w in ("veg", "vegetarian", "no meat", "no chicken", "paneer", "sabzi")):
+            diet = "vegetarian"
+        elif any(w in text_lower for w in ("non", "chicken", "egg", "meat", "fish", "everything", "sab")):
+            diet = "non-vegetarian"
+        else:
+            # Unclear answer — fall through to normal handling
+            return False
         db.set_state("user_diet", diet)
         db.set_state("onboarding_step", "wake_time")
         await update.message.reply_text(
@@ -1050,16 +1100,22 @@ async def _handle_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "What time do you usually wake up? _(e.g. 7 AM, 8:30)_",
             parse_mode="Markdown",
         )
+        return True
 
     elif step == "wake_time":
-        db.set_state("user_wake_time", text.strip())
-        db.set_state("onboarding_step", "motivation")
-        await update.message.reply_text(
-            "Perfect — I'll adjust my check-ins to match your schedule.\n\n"
-            "Last question: *what's your main reason for starting today?*\n"
-            "_I'll use this to motivate you on hard days._",
-            parse_mode="Markdown",
-        )
+        time_match = re.search(r"\b(\d{1,2}(?::\d{2})?)\s*(?:am|pm|baje)?\b", text_lower)
+        if time_match:
+            db.set_state("user_wake_time", text.strip())
+            db.set_state("onboarding_step", "motivation")
+            await update.message.reply_text(
+                "Perfect — I'll adjust my check-ins to match your schedule.\n\n"
+                "Last question: *what's your main reason for starting today?*\n"
+                "_I'll use this to motivate you on hard days._",
+                parse_mode="Markdown",
+            )
+            return True
+        else:
+            return False
 
     elif step == "motivation":
         db.set_state("user_motivation", text.strip())
@@ -1072,6 +1128,9 @@ async def _handle_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE,
             "To start: *tell me what you had for your last meal.*",
             parse_mode="Markdown",
         )
+        return True
+
+    return False
 
 
 # ── Callback handler ───────────────────────────────────────────────────────────
