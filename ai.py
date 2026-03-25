@@ -398,15 +398,18 @@ async def extract_name(text: str) -> str:
             messages=[{
                 "role": "user",
                 "content": (
-                    "Extract ONLY the person's name from this message. "
-                    "Return just the name, nothing else — no punctuation, no explanation. "
+                    "Extract ONLY the person's first name from this message. "
+                    "Return just the name as a single word, no punctuation, no explanation. "
+                    "Examples: 'Mohit hu' → Mohit, 'call me Rahul' → Rahul, 'mera naam Priya hai' → Priya. "
                     f"Message: \"{text}\""
                 ),
             }],
             max_tokens=10,
             temperature=0,
         )
-        name = resp.choices[0].message.content.strip().split()[0]
-        return name.capitalize() if name.isalpha() else "Friend"
+        # Strip all non-alpha characters (handles "Mohit.", "Mohit!", etc.)
+        raw = resp.choices[0].message.content.strip()
+        name = re.sub(r"[^a-zA-Z]", "", raw.split()[0]) if raw else ""
+        return name.capitalize() if len(name) >= 2 else "Friend"
     except Exception:
         return "Friend"
