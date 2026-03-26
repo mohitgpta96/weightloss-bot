@@ -544,6 +544,16 @@ Rules:
     return response.choices[0].message.content.strip()
 
 
+# Common Hindi/Hinglish words that are NOT names
+_NOT_A_NAME = {
+    "nai", "nahi", "haan", "han", "ha", "theek", "thik", "piya", "kha", "khaaya",
+    "khaya", "liya", "lia", "done", "ok", "okay", "yes", "no", "hi", "hello",
+    "bye", "skip", "later", "abhi", "kal", "aaj", "sab", "kuch", "mera", "meri",
+    "main", "mai", "me", "hoon", "hun", "tha", "thi", "hai", "he", "she", "the",
+    "and", "or", "but", "nahi", "nahin", "nai", "paani", "pani", "water", "glass",
+    "friend", "bhai", "yaar", "log", "chalo", "chalein",
+}
+
 async def extract_name(text: str) -> str:
     """Extract a person's name from natural language (Hindi/English mix)."""
     try:
@@ -553,17 +563,23 @@ async def extract_name(text: str) -> str:
                 "role": "user",
                 "content": (
                     "Extract ONLY the person's first name from this message. "
+                    "If the message does NOT contain a name, return exactly: NONE\n"
                     "Return just the name as a single word, no punctuation, no explanation. "
-                    "Examples: 'Mohit hu' → Mohit, 'call me Rahul' → Rahul, 'mera naam Priya hai' → Priya. "
+                    "Examples: 'Mohit hu' → Mohit, 'call me Rahul' → Rahul, "
+                    "'mera naam Priya hai' → Priya, 'nai piya' → NONE, "
+                    "'haan theek hai' → NONE, '3 glass paani' → NONE. "
                     f"Message: \"{text}\""
                 ),
             }],
             max_tokens=10,
             temperature=0,
         )
-        # Strip all non-alpha characters (handles "Mohit.", "Mohit!", etc.)
         raw = resp.choices[0].message.content.strip()
         name = re.sub(r"[^a-zA-Z]", "", raw.split()[0]) if raw else ""
-        return name.capitalize() if len(name) >= 2 else "Friend"
+        name = name.capitalize()
+        # Reject if AI returned NONE, too short, or it's a known non-name word
+        if name == "None" or len(name) < 2 or name.lower() in _NOT_A_NAME:
+            return "Friend"
+        return name
     except Exception:
         return "Friend"
