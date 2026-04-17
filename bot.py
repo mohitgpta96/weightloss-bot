@@ -222,6 +222,9 @@ async def _supplement_reminder_job(context: ContextTypes.DEFAULT_TYPE):
 async def _auth_check(update: Update) -> bool:
     """Returns True if authorized. Silently ignores unauthorized users."""
     if not _is_authorized(update):
+        chat = getattr(getattr(update, "effective_chat", None), "id", None)
+        user = getattr(getattr(update, "effective_user", None), "id", None)
+        logger.warning("Unauthorized update ignored: user=%s chat=%s", user, chat)
         return False
     return True
 
