@@ -9,6 +9,7 @@ from telegram.ext import ContextTypes
 import db
 import ai
 import charts
+import memory
 from config import (
     CALORIE_GOAL, PROTEIN_GOAL, CARB_GOAL, FAT_GOAL, WATER_GOAL,
     EATING_WINDOW_START, EATING_WINDOW_END,
@@ -1051,10 +1052,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "weight": db.get_latest_weight(),
     }
     try:
-        reply = await ai.general_chat(text, user_ctx)
+        history = db.get_history(limit=12)
+        mem_ctx = memory.get_context_for_prompt("general")
+        result = await ai.chat_and_act(text, history, user_ctx, mem_ctx)
+        actions = result.get("actions", [])
+        if actions:
+            await _execute_actions(update, context, actions)
+        reply = result.get("reply", "")
     except Exception:
-        logger.exception("general_chat failed")
+        logger.exception("chat_and_act failed")
         reply = "Use /log, /weight, /water, /sleep, or /today."
+    db.save_message("user", text)
     await update.message.reply_text(reply)
     db.save_message("assistant", reply)
 

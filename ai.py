@@ -6,6 +6,7 @@ from datetime import date as _date, timedelta as _td
 from groq import AsyncGroq
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
+import brain
 from config import CALORIE_GOAL
 
 # B8: validate API key at import time
@@ -392,7 +393,12 @@ Be practical for Indian social contexts (weddings, parties, restaurant, family d
     return response.choices[0].message.content.strip()
 
 
-async def chat_and_act(user_message: str, history: list[dict], user_context: dict) -> dict:  # noqa: C901
+async def chat_and_act(
+    user_message: str,
+    history: list[dict],
+    user_context: dict,
+    memory_context: str = "",
+) -> dict:  # noqa: C901
     """
     Main conversational brain. Like ChatGPT but for weight loss.
     Returns {"reply": str, "actions": [{"type": ..., ...}]}
@@ -416,13 +422,16 @@ async def chat_and_act(user_message: str, history: list[dict], user_context: dic
     protein_goal = user_context.get("protein_goal", 150)
     water_goal = user_context.get("water_goal", 14)
     target_weight = user_context.get("target_weight", 70)
+    mem_block = f"\nKnown patterns about this user:\n{memory_context}" if memory_context else ""
     today_str = _date.today().isoformat()
     yesterday_str = (_date.today() - _td(days=1)).isoformat()
 
     system = f"""You are a smart, friendly weight loss coach and accountability buddy for {name}.
 {name} is on a journey from ~90kg to {target_weight}kg. You help them track food, water, weight, and stay motivated.
+You can also answer general questions, continue a conversation, and start a conversation naturally when appropriate.
 
 TODAY'S DATE: {today_str}  |  YESTERDAY: {yesterday_str}
+{mem_block}
 
 TODAY'S STATUS:
 - Calories: {calories_today}/{calorie_goal} kcal eaten
@@ -438,6 +447,8 @@ YOUR JOB:
 4. Respond in the same language as the user (Hindi, English, or Hinglish mix)
 5. Keep replies SHORT — 1-3 sentences. Don't lecture.
 6. Never say "I'm an AI" or refuse to help
+7. If the user is just chatting, answer naturally and keep the conversation going
+8. If they ask about a different topic, answer directly first, then tie it back to their day only if helpful
 
 RESPOND IN THIS EXACT JSON FORMAT:
 {{
@@ -486,41 +497,38 @@ User: "kya main samosa kha sakta hoon?"
 
 IMPORTANT: Always return valid JSON. If no actions, use empty array []. Use realistic Indian portion calorie estimates."""
 
-    messages = [{"role": "system", "content": system}]
-    messages.extend(history)
-    messages.append({"role": "user", "content": user_message})
-
-    response = await client.chat.completions.create(
-        model=TEXT_MODEL,
-        messages=messages,
-        response_format={"type": "json_object"},
-        temperature=0.7,
-        max_tokens=400,
-    )
-
-    raw = response.choices[0].message.content.strip()
     try:
-        result = json.loads(raw)
+        result = await brain.generate_json(
+            system=system,
+            messages=[
+                *history,
+                {"role": "user", "content": user_message},
+            ],
+            temperature=0.7,
+            max_tokens=400,
+        )
         if "reply" not in result:
-            result["reply"] = raw
+            result["reply"] = user_message
         if "actions" not in result:
             result["actions"] = []
         return result
     except Exception:
-        return {"reply": raw, "actions": []}
+        return {"reply": user_message, "actions": []}
 
 
-async def general_chat(text: str, user_context: dict) -> str:
+async def general_chat(text: str, user_context: dict, memory_context: str = "") -> str:
     """Respond naturally to any message — questions, venting, small talk, etc."""
     name = user_context.get("name", "")
     calories = user_context.get("calories_today", 0)
     protein = user_context.get("protein_today", 0)
     streak = user_context.get("streak", 0)
     weight = user_context.get("weight", 0)
+    mem_block = f"\nKnown patterns:\n{memory_context}" if memory_context else ""
 
     system = f"""You are a friendly, warm Indian weight loss coach and accountability buddy.
 You're talking to {name or 'the user'} who is on a 90kg → 70kg journey.
 Today: {calories} kcal eaten, {protein}g protein, {streak}-day streak, current weight {weight}kg.
+{mem_block}
 
 Rules:
 - Respond in the same language as the user (Hindi/English/Hinglish)
@@ -532,16 +540,51 @@ Rules:
 - NEVER say "I'm an AI" or "I cannot"
 - Sign off responses naturally, not with bullet points"""
 
-    response = await client.chat.completions.create(
-        model=TEXT_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": text},
-        ],
-        max_tokens=200,
+    return await brain.generate_text(
+        system=system,
+        messages=[{"role": "user", "content": text}],
+        max_tokens=220,
         temperature=0.7,
     )
-    return response.choices[0].message.content.strip()
+
+
+async def generate_proactive_checkin(
+    trigger: str,
+    user_context: dict,
+    memory_context: str = "",
+) -> str:
+    """Generate a proactive message that can start a conversation."""
+    name = user_context.get("name", "there")
+    calories = user_context.get("calories_today", 0)
+    protein = user_context.get("protein_today", 0)
+    water = user_context.get("water_today", 0)
+    streak = user_context.get("streak", 0)
+    weight = user_context.get("weight", 0)
+    mem_block = f"\nKnown patterns:\n{memory_context}" if memory_context else ""
+
+    system = f"""You are a proactive weight loss assistant for {name}.
+You are allowed to start a conversation without being prompted.
+Your messages should feel like a real assistant checking in, not a notification template.
+Keep it warm, specific, and short. Ask at most one question.
+{mem_block}"""
+
+    prompt = f"""Trigger: {trigger}
+User snapshot:
+- Calories today: {calories}
+- Protein today: {protein}
+- Water today: {water}
+- Streak: {streak}
+- Weight: {weight}
+
+Write one short proactive message that could start a conversation naturally.
+If useful, mention one specific next step or ask one grounded question."""
+
+    return await brain.generate_text(
+        system=system,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=120,
+        temperature=0.8,
+    )
 
 
 # Common Hindi/Hinglish words that are NOT names

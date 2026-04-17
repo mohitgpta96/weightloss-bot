@@ -1,5 +1,7 @@
 python-telegram-bot[job-queue]==22.7
 groq>=0.9.0
+openai>=1.60.0
+anthropic>=0.40.0
 matplotlib>=3.7.0
 Pillow>=10.0.0
 python-dotenv>=1.0.0

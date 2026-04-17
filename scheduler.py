@@ -118,11 +118,28 @@ async def midday_checkin(context: ContextTypes.DEFAULT_TYPE):
         return
     food = db.get_today_food()
     if not food:
-        await _send(
-            context,
-            "📋 Haven't seen your first meal yet. What did you eat today?\n"
-            "_Just type it — e.g. 'dal chawal, 1 plate'_"
-        )
+        name = db.get_state("user_name") or "there"
+        user_ctx = {
+            "name": name,
+            "calories_today": int(db.get_today_totals()["calories"]),
+            "protein_today": int(db.get_today_totals()["protein"]),
+            "water_today": db.get_today_water(),
+            "streak": db.get_streak(),
+            "weight": db.get_latest_weight(),
+        }
+        mem_ctx = memory.get_context_for_prompt("general")
+        try:
+            prompt = await ai.generate_proactive_checkin("midday_checkin_no_food_logged", user_ctx, mem_ctx)
+            await _send(
+                context,
+                f"📋 {prompt}\n\n_Just type what you ate — e.g. 'dal chawal, 1 plate'._"
+            )
+        except Exception:
+            await _send(
+                context,
+                "📋 Haven't seen your first meal yet. What did you eat today?\n"
+                "_Just type it — e.g. 'dal chawal, 1 plate'_"
+            )
 
 
 # ── Job 5: 9 PM — 30 min window warning + protein check ──────────────────────
