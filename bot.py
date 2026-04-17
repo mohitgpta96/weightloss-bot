@@ -35,12 +35,8 @@ FOOD_HINTS = {
     "chole", "sandwich", "biryani", "wrap", "roll", "khichdi",
 }
 
-# B12: auth helper — single-user bot
 def _is_authorized(update: Update) -> bool:
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-    if not chat_id:
-        return True  # not configured — allow all (dev mode)
-    return str(update.effective_user.id) == chat_id
+    return True
 
 
 # B11: correction state persisted to DB via bot_state (no longer in-memory dict)
@@ -221,12 +217,7 @@ async def _supplement_reminder_job(context: ContextTypes.DEFAULT_TYPE):
 
 async def _auth_check(update: Update) -> bool:
     """Returns True if authorized. Silently ignores unauthorized users."""
-    if not _is_authorized(update):
-        chat = getattr(getattr(update, "effective_chat", None), "id", None)
-        user = getattr(getattr(update, "effective_user", None), "id", None)
-        logger.warning("Unauthorized update ignored: user=%s chat=%s", user, chat)
-        return False
-    return True
+    return _is_authorized(update)
 
 
 # ── Commands ───────────────────────────────────────────────────────────────────

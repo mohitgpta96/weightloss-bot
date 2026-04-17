@@ -288,14 +288,14 @@ async def run_all():
         reply = last_reply()
         assert "kg" in reply.lower() or "goal" in reply.lower(), f"Goal reply: {reply[:80]}"
 
-    # ── BLOCK 6: Auth ─────────────────────────────────────────────────────────
+    # ── BLOCK 6: Access ──────────────────────────────────────────────────────
 
-    async def t24_auth_wrong_user():
-        """Messages from unknown users should be silently ignored."""
+    async def t24_any_user_can_chat():
+        """Any Telegram user should receive a response now."""
         reset_db()
         u = make_update("hello", user_id=999999999)
         await bot_module.handle_text(u, make_context())
-        assert len(sent_messages) == 0, "Should ignore unauthorized users"
+        assert len(sent_messages) > 0, "Bot should reply to any user"
 
     # ── BLOCK 7: Edge cases ───────────────────────────────────────────────────
 
@@ -422,7 +422,7 @@ async def run_all():
         ("T21 /streak command", t21_streak_command),
         ("T22 /supplements command", t22_supplements_command),
         ("T23 /goal command", t23_goal_command),
-        ("T24 Auth: wrong user ignored", t24_auth_wrong_user),
+        ("T24 Any user can chat", t24_any_user_can_chat),
         ("T25 /start reset reruns onboarding", t25_start_reset_reruns_onboarding),
         ("T26 Measurement exits on chat", t26_measurement_exits_on_chat),
         ("T27 Supplement log", t27_supplement_log),
