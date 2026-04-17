@@ -18,6 +18,22 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
+WATER_KEYWORDS = ("water", "pani", "paani", "glass", "glasses")
+FOOD_QUESTION_PREFIXES = (
+    "kya main",
+    "can i eat",
+    "can i have",
+    "should i eat",
+    "is it okay to eat",
+)
+FOOD_HINTS = {
+    "roti", "chapati", "dal", "rice", "chawal", "egg", "eggs", "omelette",
+    "chai", "tea", "coffee", "paratha", "paneer", "chicken", "sabzi",
+    "salad", "milk", "oats", "banana", "apple", "pizza", "burger", "poha",
+    "idli", "dosa", "upma", "shake", "whey", "curd", "dahi", "rajma",
+    "chole", "sandwich", "biryani", "wrap", "roll", "khichdi",
+}
+
 # B12: auth helper — single-user bot
 def _is_authorized(update: Update) -> bool:
     chat_id = os.getenv("TELEGRAM_CHAT_ID")
@@ -57,6 +73,63 @@ def _bar(current: float, total: float, width: int = 10) -> str:
         return "░" * width
     filled = min(int((current / total) * width), width)
     return "█" * filled + "░" * (width - filled)
+
+
+def _weight_from_text(text: str) -> float | None:
+    match = re.search(r"\b(\d{2,3}(?:\.\d+)?)\s*kg\b", text.lower())
+    if not match:
+        stripped = text.strip()
+        if re.fullmatch(r"\d{2,3}(?:\.\d+)?", stripped):
+            value = float(stripped)
+            return value if 40 <= value <= 200 else None
+        return None
+    value = float(match.group(1))
+    return value if 40 <= value <= 200 else None
+
+
+def _water_from_text(text: str) -> int | None:
+    lower = text.lower()
+    if not any(word in lower for word in WATER_KEYWORDS):
+        return None
+    match = re.search(r"\b(\d{1,2})\b", lower)
+    if match:
+        return max(1, int(match.group(1)))
+    if lower in {"water", "pani", "paani", "glass water", "glass pani"}:
+        return 1
+    return None
+
+
+def _is_food_question(text: str) -> bool:
+    lower = text.lower().strip()
+    return "?" in lower or any(lower.startswith(prefix) for prefix in FOOD_QUESTION_PREFIXES)
+
+
+def _looks_like_yesterday_food_log(text: str) -> bool:
+    lower = text.lower().strip()
+    if "yesterday" not in lower and "kal" not in lower:
+        return False
+    return any(word in lower for word in FOOD_HINTS) or any(
+        verb in lower for verb in ("khaya", "khaaya", "ate", "had", "piya", "drank")
+    )
+
+
+def _looks_like_food_log(text: str) -> bool:
+    lower = text.lower().strip()
+    if not lower or "?" in lower:
+        return False
+    if any(trigger in lower for trigger in SLEEP_TRIGGERS + WAKE_TRIGGERS):
+        return False
+    if _weight_from_text(lower) is not None or _water_from_text(lower) is not None:
+        return False
+    food_verbs = ("ate", "had", "khaya", "kha liya", "piya", "drank", "lunch", "dinner", "breakfast")
+    if any(verb in lower for verb in food_verbs):
+        return True
+    words = re.findall(r"[a-zA-Z]+", lower)
+    if len(words) <= 8 and any(word in FOOD_HINTS for word in words):
+        return True
+    if re.match(r"^\d", lower) and len(words) <= 8:
+        return True
+    return False
 
 
 def _overage_msg(calories_today: int) -> str:
@@ -164,11 +237,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = (
             f"👋 *Welcome back, {name}!*\n\n"
             f"📋 *Commands:*\n"
-            "/today · /progress · /supplements · /report · /streak · /plan\n"
-            "/goal · /insights · /milestones · /deficit · /fasting\n"
-            "/mood · /workout · /measure · /undo\n"
-            "/slept · /woke\n\n"
-            "_Type what you ate, send a food photo, or ask 'kya main X kha sakta hoon?'_\n\n"
+            "/today · /log · /weight · /water · /sleep · /progress · /report\n"
+            "/help · /supplements · /streak · /goal · /insights\n"
+            "/mood · /workout · /measure · /undo · /slept · /woke\n\n"
+            "_Use commands for tracking. You can also send a food photo or ask 'kya main X kha sakta hoon?'_\n\n"
             "_To update your name or profile: /start reset_"
         )
         await update.message.reply_text(text, parse_mode="Markdown")
@@ -184,10 +256,93 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _auth_check(update):
+        return
+    text = (
+        "📘 *Core Commands*\n\n"
+        "/today - today's calories, protein, water, and supplements\n"
+        "/log <food> - log a meal with AI calorie estimate\n"
+        "/weight <kg> - log today's weight\n"
+        "/water [glasses] - log water, default is 1 glass\n"
+        "/sleep <hours> - log last night's sleep duration\n"
+        "/progress - weight chart\n"
+        "/report - weekly summary\n\n"
+        "*Extras*\n"
+        "/supplements, /streak, /goal, /insights, /mood, /workout, /measure, /undo\n\n"
+        "_Free text still works for simple things like '2 roti aur dal', '89.5 kg', or '3 glass pani'._"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
 async def today(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _auth_check(update):
         return
     await update.message.reply_text(_dashboard_text(), parse_mode="Markdown")
+
+
+async def log_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _auth_check(update):
+        return
+    text = " ".join(context.args).strip()
+    if not text:
+        await update.message.reply_text("Usage: `/log 2 roti aur dal`", parse_mode="Markdown")
+        return
+    await context.bot.send_chat_action(update.effective_chat.id, "typing")
+    try:
+        food_data = await ai.analyze_food_text(text)
+        await _process_food(update, context, food_data, raw_text=text)
+    except Exception:
+        logger.exception("Food analysis failed for /log")
+        await update.message.reply_text("Couldn't estimate that meal right now. Try a simpler description.")
+
+
+async def weight_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _auth_check(update):
+        return
+    text = " ".join(context.args).strip()
+    value = _weight_from_text(text)
+    if value is None:
+        await update.message.reply_text("Usage: `/weight 89.5 kg`", parse_mode="Markdown")
+        return
+    db.log_weight(value)
+    lost = STARTING_WEIGHT - value
+    remaining = value - TARGET_WEIGHT
+    await update.message.reply_text(
+        f"⚖️ Logged: *{value:.1f} kg*\nLost: {lost:.1f} kg | Remaining: {remaining:.1f} kg",
+        parse_mode="Markdown",
+    )
+
+
+async def water_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _auth_check(update):
+        return
+    text = " ".join(context.args).strip()
+    glasses = 1
+    if text:
+        match = re.search(r"\d+", text)
+        if not match:
+            await update.message.reply_text("Usage: `/water` or `/water 3`", parse_mode="Markdown")
+            return
+        glasses = max(1, int(match.group()))
+    total = db.log_water(glasses)
+    await update.message.reply_text(
+        f"💧 Logged {glasses} glass{'es' if glasses != 1 else ''}. Today: *{total}/{WATER_GOAL}*",
+        parse_mode="Markdown",
+    )
+
+
+async def sleep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await _auth_check(update):
+        return
+    text = " ".join(context.args).strip()
+    match = re.search(r"\d+(?:\.\d+)?", text)
+    if not match:
+        await update.message.reply_text("Usage: `/sleep 7.5`", parse_mode="Markdown")
+        return
+    hours = float(match.group())
+    db.log_sleep_duration(hours)
+    await update.message.reply_text(f"😴 Logged sleep: *{hours:.1f} hours*", parse_mode="Markdown")
 
 
 async def supplements(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -263,6 +418,9 @@ async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sleep_history:
         lines.append("\n😴 *Sleep log (last 7 days):*")
         for entry in sleep_history[-7:]:
+            if entry.get("hours") is not None:
+                lines.append(f"  {entry['date']}: {entry['hours']:.1f} hours")
+                continue
             wake = entry["wake_time"] or "—"
             sleep = entry["sleep_time"] or "—"
             lines.append(f"  {entry['date']}: slept {sleep}, woke {wake}")
@@ -739,6 +897,30 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     text_lower = text.lower()
 
+    pending_correction = _get_pending_correction()
+    if pending_correction:
+        await context.bot.send_chat_action(update.effective_chat.id, "typing")
+        try:
+            food_data = await ai.analyze_food_text(text)
+            db.update_food_correction(
+                pending_correction["food_id"],
+                food_data.get("food_name", "Corrected food"),
+                int(food_data.get("calories", 0)),
+                float(food_data.get("protein", 0)),
+                float(food_data.get("carbs", 0)),
+                float(food_data.get("fat", 0)),
+            )
+            _clear_pending_correction()
+            await update.message.reply_text(
+                f"✏️ Updated entry to *{food_data.get('food_name', 'Corrected food')}* — "
+                f"{int(food_data.get('calories', 0))} kcal",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            logger.exception("Food correction failed")
+            await update.message.reply_text("Couldn't update that entry right now. Try again in a simpler format.")
+        return
+
     # ── Awaiting measurements (/measure command) — keep as structured input ──
     if db.get_state("awaiting_measurements") == "1":
         parts = text_lower.split()
@@ -767,10 +949,99 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ── Save user message to history ──
     db.save_message("user", text)
+    weight = _weight_from_text(text)
+    if weight is not None:
+        db.log_weight(weight)
+        reply = (
+            f"⚖️ Logged: *{weight:.1f} kg*\n"
+            f"Lost: {STARTING_WEIGHT - weight:.1f} kg | Remaining: {weight - TARGET_WEIGHT:.1f} kg"
+        )
+        await update.message.reply_text(reply, parse_mode="Markdown")
+        db.save_message("assistant", reply)
+        return
 
-    # ── Build user context ──
+    water = _water_from_text(text)
+    if water is not None:
+        total = db.log_water(water)
+        reply = f"💧 Logged {water} glass{'es' if water != 1 else ''}. Today: *{total}/{WATER_GOAL}*"
+        await update.message.reply_text(reply, parse_mode="Markdown")
+        db.save_message("assistant", reply)
+        return
+
+    if any(trigger in text_lower for trigger in SLEEP_TRIGGERS):
+        db.log_sleep()
+        db.set_state("is_sleeping", "1")
+        reply = "😴 Sleep logged. Good night."
+        await update.message.reply_text(reply)
+        db.save_message("assistant", reply)
+        return
+
+    if any(trigger in text_lower for trigger in WAKE_TRIGGERS):
+        db.log_wake()
+        db.set_state("is_sleeping", "0")
+        db.set_state("first_food_today", "")
+        await _send_morning_summary(update.message, context)
+        return
+
+    if _looks_like_yesterday_food_log(text):
+        try:
+            food_data = await ai.analyze_food_text(text)
+            yesterday = (date.today() - timedelta(days=1)).isoformat()
+            db.log_food(
+                food_data.get("food_name", "Yesterday meal"),
+                int(food_data.get("calories", 0)),
+                float(food_data.get("protein", 0)),
+                float(food_data.get("carbs", 0)),
+                float(food_data.get("fat", 0)),
+                bool(food_data.get("is_restaurant", False)),
+                raw_text=text,
+                for_date=yesterday,
+            )
+            reply = f"🗓 Logged for yesterday: *{food_data.get('food_name', 'Meal')}*"
+            await update.message.reply_text(reply, parse_mode="Markdown")
+            db.save_message("assistant", reply)
+            return
+        except Exception:
+            logger.exception("Yesterday food analysis failed")
+
+    if _is_food_question(text):
+        totals = db.get_today_totals()
+        remaining_calories = max(CALORIE_GOAL - int(totals["calories"]), 0)
+        remaining_protein = max(PROTEIN_GOAL - int(totals["protein"]), 0)
+        try:
+            result = await ai.check_food_safety(text, remaining_calories, remaining_protein)
+            status = "✅ Fits today" if result.get("is_safe") else "⚠️ Use caution"
+            lines = [
+                f"{status}: *{result.get('food', 'That food')}*",
+                f"Estimated: {result.get('estimated_calories', 0)} kcal, {result.get('estimated_protein', 0)}g protein",
+                result.get("reason", ""),
+                result.get("recommendation", ""),
+            ]
+            alternatives = result.get("alternatives", [])[:3]
+            if alternatives:
+                lines.append("")
+                lines.append("*Better options:*")
+                for alt in alternatives:
+                    lines.append(
+                        f"• {alt.get('name', 'Option')} — {alt.get('calories', 0)} kcal, "
+                        f"{alt.get('protein', 0)}g protein"
+                    )
+            reply = "\n".join(line for line in lines if line)
+            await update.message.reply_text(reply, parse_mode="Markdown")
+            db.save_message("assistant", reply)
+            return
+        except Exception:
+            logger.exception("Food safety check failed")
+
+    if _looks_like_food_log(text):
+        try:
+            food_data = await ai.analyze_food_text(text)
+            await _process_food(update, context, food_data, raw_text=text)
+            return
+        except Exception:
+            logger.exception("Text food analysis failed")
+
     t = db.get_today_totals()
-    from config import PROTEIN_GOAL as PG, WATER_GOAL as WG, TARGET_WEIGHT as TW
     user_ctx = {
         "name": db.get_state("user_name") or "",
         "calories_today": int(t["calories"]),
@@ -778,39 +1049,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "water_today": db.get_today_water(),
         "streak": db.get_streak(),
         "weight": db.get_latest_weight(),
-        "calorie_goal": CALORIE_GOAL,
-        "protein_goal": PG,
-        "water_goal": WG,
-        "target_weight": TW,
     }
-
-    # ── Get conversation history ──
-    history = db.get_history(limit=12)
-
-    # ── Call AI brain ──
     try:
-        result = await ai.chat_and_act(text, history, user_ctx)
-        reply = result.get("reply", "")
-        actions = result.get("actions", [])
-    except Exception as e:
-        logger.exception("chat_and_act failed")
-        reply = "Kuch problem aa gayi, dobara try karo."
-        actions = []
-
-    # ── Execute any logged actions ──
-    if actions:
-        await _execute_actions(update, context, actions)
-
-    # ── Send reply ──
-    if reply:
-        await update.message.reply_text(reply)
-        db.save_message("assistant", reply)
-
-    # ── Supplement reminder after first food ──
-    has_food_action = any(a.get("type") in ("log_food",) for a in actions)
-    if has_food_action and not db.get_state("first_food_today"):
-        db.set_state("first_food_today", datetime.now().isoformat())
-        context.job_queue.run_once(_supplement_reminder_job, when=1800)
+        reply = await ai.general_chat(text, user_ctx)
+    except Exception:
+        logger.exception("general_chat failed")
+        reply = "Use /log, /weight, /water, /sleep, or /today."
+    await update.message.reply_text(reply)
+    db.save_message("assistant", reply)
 
 
 # ── Onboarding helpers ─────────────────────────────────────────────────────────

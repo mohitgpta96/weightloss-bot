@@ -30,7 +30,12 @@ def main():
 
     # ── Commands ──────────────────────────────────────────────────────────────
     app.add_handler(CommandHandler("start",       bot.start))
+    app.add_handler(CommandHandler("help",        bot.help_cmd))
     app.add_handler(CommandHandler("today",       bot.today))
+    app.add_handler(CommandHandler("log",         bot.log_cmd))
+    app.add_handler(CommandHandler("weight",      bot.weight_cmd))
+    app.add_handler(CommandHandler("water",       bot.water_cmd))
+    app.add_handler(CommandHandler("sleep",       bot.sleep_cmd))
     app.add_handler(CommandHandler("supplements", bot.supplements))
     app.add_handler(CommandHandler("progress",    bot.progress))
     app.add_handler(CommandHandler("report",      bot.report))

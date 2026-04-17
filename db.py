@@ -60,7 +60,8 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 date TEXT NOT NULL,
                 sleep_time TEXT,
-                wake_time TEXT
+                wake_time TEXT,
+                hours REAL
             );
 
             CREATE TABLE IF NOT EXISTS bot_state (
@@ -166,6 +167,12 @@ def init_db():
             conn.execute(
                 "INSERT OR IGNORE INTO bot_state (key, value) VALUES (?, ?)", (key, val)
             )
+        sleep_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(sleep_logs)").fetchall()
+        }
+        if "hours" not in sleep_columns:
+            conn.execute("ALTER TABLE sleep_logs ADD COLUMN hours REAL")
 
 
 # ── Conversation history ───────────────────────────────────────────────────────
@@ -387,10 +394,28 @@ def log_wake(wake_time: str | None = None):
         )
 
 
+def log_sleep_duration(hours: float):
+    today = date.today().isoformat()
+    with get_conn() as conn:
+        existing = conn.execute(
+            "SELECT id FROM sleep_logs WHERE date = ? ORDER BY id DESC LIMIT 1", (today,)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE sleep_logs SET hours = ? WHERE id = ?",
+                (hours, existing["id"]),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO sleep_logs (date, hours) VALUES (?, ?)",
+                (today, hours),
+            )
+
+
 def get_sleep_history(days: int = 7) -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT date, sleep_time, wake_time FROM sleep_logs ORDER BY date DESC LIMIT ?",
+            "SELECT date, sleep_time, wake_time, hours FROM sleep_logs ORDER BY date DESC LIMIT ?",
             (days,),
         ).fetchall()
         return [dict(r) for r in rows]
