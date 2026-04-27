@@ -88,6 +88,13 @@ def _water_from_text(text: str) -> int | None:
     lower = text.lower()
     if not any(word in lower for word in WATER_KEYWORDS):
         return None
+    ml_match = re.search(r"\b(\d{1,4}(?:\.\d+)?)\s*ml\b", lower)
+    if ml_match:
+        ml_value = float(ml_match.group(1))
+        return max(1, round(ml_value / 250))
+    liter_match = re.search(r"\b(\d(?:\.\d+)?)\s*l(?:iter|itre)?s?\b", lower)
+    if liter_match:
+        return max(1, round(float(liter_match.group(1)) * 1000 / 250))
     match = re.search(r"\b(\d{1,2})\b", lower)
     if match:
         return max(1, int(match.group(1)))
@@ -322,7 +329,7 @@ async def water_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         glasses = max(1, int(match.group()))
     total = db.log_water(glasses)
     await update.message.reply_text(
-        f"💧 Logged {glasses} glass{'es' if glasses != 1 else ''}. Today: *{total}/{WATER_GOAL}*",
+        f"💧 Logged {glasses} glass{'es' if glasses != 1 else ''} of water. Today: *{total}/{WATER_GOAL}*",
         parse_mode="Markdown",
     )
 
@@ -958,7 +965,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     water = _water_from_text(text)
     if water is not None:
         total = db.log_water(water)
-        reply = f"💧 Logged {water} glass{'es' if water != 1 else ''}. Today: *{total}/{WATER_GOAL}*"
+        reply = f"💧 Logged {water} glass{'es' if water != 1 else ''} of water. Today: *{total}/{WATER_GOAL}*"
         await update.message.reply_text(reply, parse_mode="Markdown")
         db.save_message("assistant", reply)
         return

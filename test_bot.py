@@ -235,9 +235,13 @@ async def run_all():
     async def t17_water_log_english():
         reset_db()
         db.set_state("user_name", "Mohit")
-        await bot_module.handle_text(make_update("drank 2 glasses of water"), make_context())
+        await bot_module.handle_text(make_update("I had 500ml of water today"), make_context())
         water = db.get_today_water()
+        reply = last_reply()
         assert water >= 2, f"Water should be >= 2, got {water}"
+        assert "kcal" not in reply.lower(), f"Water reply should not mention calories: {reply[:120]}"
+        assert "protein" not in reply.lower(), f"Water reply should not mention protein: {reply[:120]}"
+        assert "fast" not in reply.lower(), f"Water reply should not mention fasting: {reply[:120]}"
 
     # ── BLOCK 4: Free chat / AI responses ────────────────────────────────────
 
